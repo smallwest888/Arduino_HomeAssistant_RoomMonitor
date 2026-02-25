@@ -37,6 +37,7 @@ constexpr const char* TOPIC_SOIL2_CONFIG = "homeassistant/sensor/room_monitor_so
 
 // Timing and retry parameters
 constexpr uint32_t PUBLISH_INTERVAL_MS = 10UL * 1000UL;
+constexpr uint32_t DISPLAY_REFRESH_MS = 1000UL;
 constexpr uint32_t WIFI_RETRY_DELAY_MS = 500UL;
 constexpr uint8_t WIFI_MAX_RETRIES = 20U;
 constexpr uint32_t MQTT_RETRY_DELAY_MS = 5000UL;

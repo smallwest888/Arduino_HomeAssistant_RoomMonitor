@@ -4,8 +4,13 @@
 
 #include "config.h"
 
+namespace {
+uint32_t g_last_wifi_attempt_ms = 0UL;
+}  // namespace
+
 void WifiManager_Init() {
   WiFi.disconnect();
+  g_last_wifi_attempt_ms = 0UL;
 }
 
 bool WifiManager_EnsureConnected() {
@@ -13,30 +18,16 @@ bool WifiManager_EnsureConnected() {
     return true;
   }
 
+  const uint32_t now = millis();
+  if ((now - g_last_wifi_attempt_ms) < RoomMonitorConfig::WIFI_RETRY_DELAY_MS) {
+    return false;
+  }
+  g_last_wifi_attempt_ms = now;
+
   Serial.print("Connecting to WiFi SSID: ");
   Serial.println(RoomMonitorConfig::WIFI_SSID);
 
   WiFi.disconnect();
-  delay(2UL * RoomMonitorConfig::WIFI_RETRY_DELAY_MS);
   WiFi.begin(RoomMonitorConfig::WIFI_SSID, RoomMonitorConfig::WIFI_PASSWORD);
-
-  uint8_t retry = 0U;
-  while ((WiFi.status() != WL_CONNECTED) && (retry < RoomMonitorConfig::WIFI_MAX_RETRIES)) {
-    delay(RoomMonitorConfig::WIFI_RETRY_DELAY_MS);
-    Serial.print(".");
-    retry++;
-  }
-
-  Serial.println();
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("Signal Strength (dBm): ");
-    Serial.println(WiFi.RSSI());
-    return true;
-  }
-
-  Serial.println("WiFi connection failed");
   return false;
 }

@@ -12,6 +12,8 @@ PubSubClient g_mqtt_client(g_wifi_client);
 bool g_discovery_sent = false;
 uint32_t g_last_connect_attempt_ms = 0UL;
 constexpr uint16_t MQTT_BUFFER_SIZE_BYTES = 1024U;
+uint32_t g_retry_delay_ms = RoomMonitorConfig::MQTT_RETRY_DELAY_MS;
+constexpr uint32_t MQTT_RETRY_MAX_DELAY_MS = 60000UL;
 
 String BuildClientId() {
   byte mac[RoomMonitorConfig::MAC_ADDRESS_LENGTH];
@@ -114,6 +116,7 @@ void MqttManager_Loop() {
 
 bool MqttManager_EnsureConnected() {
   if (g_mqtt_client.connected()) {
+    g_retry_delay_ms = RoomMonitorConfig::MQTT_RETRY_DELAY_MS;
     if (!g_discovery_sent) {
       SendDiscoveryConfig();
       g_discovery_sent = true;
@@ -126,7 +129,7 @@ bool MqttManager_EnsureConnected() {
   }
 
   const uint32_t now = millis();
-  if ((now - g_last_connect_attempt_ms) < RoomMonitorConfig::MQTT_RETRY_DELAY_MS) {
+  if ((now - g_last_connect_attempt_ms) < g_retry_delay_ms) {
     return false;
   }
   g_last_connect_attempt_ms = now;
@@ -151,9 +154,16 @@ bool MqttManager_EnsureConnected() {
   if (connected) {
     Serial.println("connected");
     g_discovery_sent = false;
+    g_retry_delay_ms = RoomMonitorConfig::MQTT_RETRY_DELAY_MS;
   } else {
     Serial.print("failed, rc=");
     Serial.println(g_mqtt_client.state());
+    if (g_retry_delay_ms < MQTT_RETRY_MAX_DELAY_MS) {
+      g_retry_delay_ms *= 2UL;
+      if (g_retry_delay_ms > MQTT_RETRY_MAX_DELAY_MS) {
+        g_retry_delay_ms = MQTT_RETRY_MAX_DELAY_MS;
+      }
+    }
   }
 
   if (connected && !g_discovery_sent) {

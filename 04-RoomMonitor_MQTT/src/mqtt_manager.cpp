@@ -11,9 +11,7 @@ WiFiClient g_wifi_client;
 PubSubClient g_mqtt_client(g_wifi_client);
 bool g_discovery_sent = false;
 uint32_t g_last_connect_attempt_ms = 0UL;
-constexpr uint16_t MQTT_BUFFER_SIZE_BYTES = 1024U;
 uint32_t g_retry_delay_ms = RoomMonitorConfig::MQTT_RETRY_DELAY_MS;
-constexpr uint32_t MQTT_RETRY_MAX_DELAY_MS = 60000UL;
 
 String BuildClientId() {
   byte mac[RoomMonitorConfig::MAC_ADDRESS_LENGTH];
@@ -21,7 +19,7 @@ String BuildClientId() {
 
   String client_id = "MKRRoomMon-";
   for (uint8_t i = 0U; i < RoomMonitorConfig::MAC_ADDRESS_LENGTH; i++) {
-    if (mac[i] < 16U) {
+    if (mac[i] < RoomMonitorConfig::HEX_ZERO_PAD_THRESHOLD) {
       client_id += "0";
     }
     client_id += String(mac[i], HEX);
@@ -103,11 +101,54 @@ void SendDiscoveryConfig() {
 }
 }  // namespace
 
+// If we dont check wifi and mqtt connection, main loop will be blocked
+namespace {
+void PublishDiscoveryIfNeeded() {
+  if (!g_discovery_sent) {
+    SendDiscoveryConfig();
+    g_discovery_sent = true;
+  }
+}
+
+bool IsReconnectWindowOpen() {
+  const uint32_t now = millis();
+  if ((now - g_last_connect_attempt_ms) < g_retry_delay_ms) {
+    return false;
+  }
+  g_last_connect_attempt_ms = now;
+  return true;
+}
+
+bool TryConnectMqtt() {
+  const String client_id = BuildClientId();
+  if (strlen(RoomMonitorConfig::MQTT_USER) > 0U) {
+    return g_mqtt_client.connect(
+        client_id.c_str(),
+        RoomMonitorConfig::MQTT_USER,
+        RoomMonitorConfig::MQTT_PASSWORD);
+  }
+  return g_mqtt_client.connect(client_id.c_str());
+}
+
+void UpdateRetryDelayAfterConnect(const bool connected) {
+  if (connected) {
+    g_retry_delay_ms = RoomMonitorConfig::MQTT_RETRY_DELAY_MS;
+    return;
+  }
+  if (g_retry_delay_ms < RoomMonitorConfig::MQTT_RETRY_MAX_DELAY_MS) {
+    g_retry_delay_ms *= 2UL;
+    if (g_retry_delay_ms > RoomMonitorConfig::MQTT_RETRY_MAX_DELAY_MS) {
+      g_retry_delay_ms = RoomMonitorConfig::MQTT_RETRY_MAX_DELAY_MS;
+    }
+  }
+}
+}  // namespace
+
 void MqttManager_Init() {
-  g_mqtt_client.setBufferSize(MQTT_BUFFER_SIZE_BYTES);
+  g_mqtt_client.setBufferSize(RoomMonitorConfig::MQTT_BUFFER_SIZE_BYTES);
   g_mqtt_client.setServer(RoomMonitorConfig::MQTT_SERVER, RoomMonitorConfig::MQTT_PORT);
   Serial.print("MQTT buffer size set to ");
-  Serial.println(MQTT_BUFFER_SIZE_BYTES);
+  Serial.println(RoomMonitorConfig::MQTT_BUFFER_SIZE_BYTES);
 }
 
 void MqttManager_Loop() {
@@ -116,11 +157,8 @@ void MqttManager_Loop() {
 
 bool MqttManager_EnsureConnected() {
   if (g_mqtt_client.connected()) {
-    g_retry_delay_ms = RoomMonitorConfig::MQTT_RETRY_DELAY_MS;
-    if (!g_discovery_sent) {
-      SendDiscoveryConfig();
-      g_discovery_sent = true;
-    }
+    UpdateRetryDelayAfterConnect(true);
+    PublishDiscoveryIfNeeded();
     return true;
   }
 
@@ -128,11 +166,9 @@ bool MqttManager_EnsureConnected() {
     return false;
   }
 
-  const uint32_t now = millis();
-  if ((now - g_last_connect_attempt_ms) < g_retry_delay_ms) {
+  if (!IsReconnectWindowOpen()) {
     return false;
   }
-  g_last_connect_attempt_ms = now;
 
   Serial.print("Attempting MQTT connection to ");
   Serial.print(RoomMonitorConfig::MQTT_SERVER);
@@ -140,35 +176,17 @@ bool MqttManager_EnsureConnected() {
   Serial.print(RoomMonitorConfig::MQTT_PORT);
   Serial.print(" ... ");
 
-  const String client_id = BuildClientId();
-  bool connected = false;
-  if (strlen(RoomMonitorConfig::MQTT_USER) > 0U) {
-    connected = g_mqtt_client.connect(
-        client_id.c_str(),
-        RoomMonitorConfig::MQTT_USER,
-        RoomMonitorConfig::MQTT_PASSWORD);
-  } else {
-    connected = g_mqtt_client.connect(client_id.c_str());
-  }
+  const bool connected = TryConnectMqtt();
 
   if (connected) {
     Serial.println("connected");
     g_discovery_sent = false;
-    g_retry_delay_ms = RoomMonitorConfig::MQTT_RETRY_DELAY_MS;
+    UpdateRetryDelayAfterConnect(true);
+    PublishDiscoveryIfNeeded();
   } else {
     Serial.print("failed, rc=");
     Serial.println(g_mqtt_client.state());
-    if (g_retry_delay_ms < MQTT_RETRY_MAX_DELAY_MS) {
-      g_retry_delay_ms *= 2UL;
-      if (g_retry_delay_ms > MQTT_RETRY_MAX_DELAY_MS) {
-        g_retry_delay_ms = MQTT_RETRY_MAX_DELAY_MS;
-      }
-    }
-  }
-
-  if (connected && !g_discovery_sent) {
-    SendDiscoveryConfig();
-    g_discovery_sent = true;
+    UpdateRetryDelayAfterConnect(false);
   }
 
   return connected;
@@ -188,11 +206,20 @@ bool MqttManager_PublishData(const SensorData* data) {
   const String soil1_str = String(data->soil1_pct);
   const String soil2_str = String(data->soil2_pct);
 
+  struct StateMsg {
+    const char* topic;
+    const char* payload;
+  };
+  const StateMsg messages[] = {
+      {RoomMonitorConfig::TOPIC_TEMP_STATE, temp_str.c_str()},
+      {RoomMonitorConfig::TOPIC_HUM_STATE, hum_str.c_str()},
+      {RoomMonitorConfig::TOPIC_PRESSURE_STATE, pressure_str.c_str()},
+      {RoomMonitorConfig::TOPIC_SOIL1_STATE, soil1_str.c_str()},
+      {RoomMonitorConfig::TOPIC_SOIL2_STATE, soil2_str.c_str()}};
+
   bool all_ok = true;
-  all_ok = g_mqtt_client.publish(RoomMonitorConfig::TOPIC_TEMP_STATE, temp_str.c_str(), true) && all_ok;
-  all_ok = g_mqtt_client.publish(RoomMonitorConfig::TOPIC_HUM_STATE, hum_str.c_str(), true) && all_ok;
-  all_ok = g_mqtt_client.publish(RoomMonitorConfig::TOPIC_PRESSURE_STATE, pressure_str.c_str(), true) && all_ok;
-  all_ok = g_mqtt_client.publish(RoomMonitorConfig::TOPIC_SOIL1_STATE, soil1_str.c_str(), true) && all_ok;
-  all_ok = g_mqtt_client.publish(RoomMonitorConfig::TOPIC_SOIL2_STATE, soil2_str.c_str(), true) && all_ok;
+  for (uint8_t i = 0U; i < (sizeof(messages) / sizeof(messages[0])); i++) {
+    all_ok = g_mqtt_client.publish(messages[i].topic, messages[i].payload, true) && all_ok;
+  }
   return all_ok;
 }
